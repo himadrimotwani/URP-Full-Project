@@ -2,6 +2,8 @@
 Negotiation routes for contract proposals and chat.
 """
 
+from functools import wraps
+
 from fastapi import APIRouter, HTTPException
 
 from simulation.core import Contract
@@ -28,7 +30,20 @@ from app.services.storage_service import log_chat_record
 router = APIRouter()
 
 
+def serialize_negotiation(handler):
+    """Keep chat, proposal, and offer decisions atomic within each session."""
+    @wraps(handler)
+    def wrapped(request):
+        state = SESSIONS.get(request.session_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        with state.negotiation_lock:
+            return handler(request)
+    return wrapped
+
+
 @router.post("/game/negotiate", response_model=NegotiateResponse)
+@serialize_negotiation
 def negotiate(request: NegotiateRequest) -> NegotiateResponse:
     """
     Handles initial contract proposal from the student.
@@ -103,6 +118,7 @@ def negotiate(request: NegotiateRequest) -> NegotiateResponse:
     from datetime import datetime
     state.negotiation_chat_history = []  # Start fresh chat history
     state.negotiation_draft_contract = None  # Clear any previous draft
+    state.negotiation_offer_version += 1
     # Store start time for this negotiation (will be added to history when negotiation ends)
     state._current_negotiation_start_time = datetime.now().isoformat()
 
@@ -199,10 +215,12 @@ def negotiate(request: NegotiateRequest) -> NegotiateResponse:
         ai_message=ai_message,
         decision=decision,
         counter_contract=counter_contract_data,
+        offer_version=state.negotiation_offer_version if counter_contract_data else None,
     )
 
 
 @router.post("/game/negotiate/chat", response_model=NegotiationChatResponse)
+@serialize_negotiation
 def negotiation_chat(request: NegotiationChatRequest) -> NegotiationChatResponse:
     """
     Handles chat messages during negotiation between student and AI supplier.
@@ -217,8 +235,8 @@ def negotiation_chat(request: NegotiationChatRequest) -> NegotiationChatResponse
         Adds student's message to negotiation chat history.
         Generates AI response using generate_chat_response() with full context.
         Adds AI's response to chat history.
-        Checks if AI detected agreement and created a draft contract.
-        If draft contract created, stores it for student to accept/reject.
+        Withdraws any previous offer before generating the supplier response.
+        Replaces the offer state with the new draft (or None), with a new version.
     
     Output:
         Returns a NegotiationChatResponse containing:
@@ -241,6 +259,15 @@ def negotiation_chat(request: NegotiationChatRequest) -> NegotiationChatResponse
             detail="Game is over. Start a new game.",
         )
     
+    if has_active_contract(state):
+        raise HTTPException(status_code=400, detail="A contract is already active.")
+
+    # Resuming chat withdraws the previous offer before any AI work begins.
+    # Keep it only as context; it must never remain available for acceptance.
+    previous_draft = state.negotiation_draft_contract
+    state.negotiation_draft_contract = None
+    state.negotiation_offer_version += 1
+
     # Add student message to chat history
     state.negotiation_chat_history.append({
         "role": "student",
@@ -253,7 +280,7 @@ def negotiation_chat(request: NegotiationChatRequest) -> NegotiationChatResponse
     
     supplier_response = generate_chat_response(
         state.negotiation_chat_history,
-        state.negotiation_draft_contract,
+        previous_draft,
         state,  # Pass game state for context
         initial_contract_type  # Pass initial contract type to enforce it
     )
@@ -264,19 +291,21 @@ def negotiation_chat(request: NegotiationChatRequest) -> NegotiationChatResponse
         "content": supplier_response["message"]
     })
     
-    # Step 4: Update draft contract if AI detected agreement
+    # Every response replaces the offer state, including responses without a draft.
+    state.negotiation_draft_contract = supplier_response.get("draft_contract")
     draft_contract_data = None
-    if supplier_response.get("draft_contract"):
-        state.negotiation_draft_contract = supplier_response["draft_contract"]
+    if state.negotiation_draft_contract is not None:
         draft_contract_data = to_contract_data(state.negotiation_draft_contract)
     
     return NegotiationChatResponse(
         supplier_message=supplier_response["message"],
         negotiation_draft_contract=draft_contract_data,
+        offer_version=state.negotiation_offer_version if draft_contract_data else None,
     )
 
 
 @router.post("/game/negotiate/accept-counter", response_model=AcceptCounterResponse)
+@serialize_negotiation
 def accept_counter(request: AcceptCounterRequest) -> AcceptCounterResponse:
     """
     Handles student's acceptance or rejection of a draft contract (offer).
@@ -285,6 +314,7 @@ def accept_counter(request: AcceptCounterRequest) -> AcceptCounterResponse:
         request: AcceptCounterRequest containing:
             - session_id: Game session identifier
             - accept: Boolean indicating whether student accepts (True) or rejects (False) the offer
+            - offer_version: The version shown with the student's offer
     
     What happens:
         Validates session exists and game is not over.
@@ -319,14 +349,20 @@ def accept_counter(request: AcceptCounterRequest) -> AcceptCounterResponse:
             detail="Game is over. Start a new game.",
         )
     
+    if has_active_contract(state):
+        raise HTTPException(status_code=400, detail="A contract is already active.")
+
+    if (
+        state.negotiation_draft_contract is None
+        or request.offer_version != state.negotiation_offer_version
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="This offer is no longer current. Review the latest supplier offer.",
+        )
+
     if request.accept:
         # Accept the counteroffer - make draft contract active
-        if state.negotiation_draft_contract is None:
-            raise HTTPException(
-                status_code=400,
-                detail="No counteroffer available to accept.",
-            )
-        
         # Add acceptance message to chat history before saving (for completeness in history)
         state.negotiation_chat_history.append({
             "role": "student",

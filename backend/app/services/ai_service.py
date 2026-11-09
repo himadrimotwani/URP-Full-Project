@@ -223,21 +223,18 @@ def generate_chat_response(
     
     Inputs:
         chat_history: List of previous chat messages with role and content.
-        current_draft_contract: Existing draft contract if one was already proposed, None otherwise.
+        current_draft_contract: Previous, withdrawn draft used only as context.
         game_state: Current game state for context (demand history, rounds played, etc.).
         initial_contract_type: The contract type from initial proposal (cannot be changed).
     
     What happens:
         Determines which AI client to use (OpenAI or DeepSeek).
         Builds a system prompt with game context, demand history, and negotiation constraints.
-        Checks if student's message might indicate agreement.
-        If agreement likely, adds explicit agreement check question to prompt.
+        Requests a structured response with the current offer state on every turn.
         Sends conversation history and prompt to AI.
         Parses AI response to extract message and any JSON contract.
-        Removes technical markers (NEGOTIATION_COMPLETE, CONTRACT_JSON) from message.
-        Cleans the message (removes markdown, emojis).
-        Detects agreement and extracts contract terms if present.
-        Creates draft contract if agreement detected.
+        Creates a draft only from complete terms in the latest structured response.
+        Returns no draft on missing terms, malformed output, or provider failure.
     
     Output:
         Returns a dictionary with:
@@ -338,48 +335,42 @@ NEGOTIATION GUIDELINES:
 RESPONSE FORMAT:
 Respond naturally as a supplier in conversation. Keep responses conversational and engaging. If you detect agreement on specific terms, you can propose finalizing the contract."""
     
-    # Check if student's last message might indicate agreement
-    # This helps us decide whether to ask AI to explicitly check for agreement
-    last_student_msg = None
-    for msg in reversed(chat_history):  # Look backwards through history
-        if msg.get("role") == "student":
-            last_student_msg = msg.get("content", "").lower()
-            break
-    
-    # List of phrases that might indicate student agrees to terms
-    agreement_indicators = [
-        "sounds good", "that works", "works for me", "yes", "yeah", "ok", "okay", "sure",
-        "lock in", "lock it in", "accept", "accepted", "deal", "agreed", "agree",
-        "let's proceed", "lets proceed", "finalize", "finalise", "confirm", "we have a deal"
-    ]
-    might_be_agreement = last_student_msg and any(phrase in last_student_msg for phrase in agreement_indicators)
+    # A previous draft is context only: starting this turn withdrew that offer.
+    if current_draft_contract is not None:
+        system_prompt += f"""
+
+PREVIOUS OFFER (withdrawn while negotiations resume):
+- Wholesale price: {current_draft_contract.wholesale_price}
+- Buyback price: {current_draft_contract.buyback_price}
+- Contract length: {current_draft_contract.length}
+Use these terms only as context when discussing a replacement offer."""
+
+    # Request offer state on EVERY turn, including revisions after a draft exists.
+    system_prompt += f"""
+
+Return ONLY a JSON object in this format:
+{{
+  "response": "Your conversational supplier message",
+  "contract": {{
+    "wholesale_price": 25,
+    "buyback_price": 10,
+    "contract_length": 3,
+    "contract_type": "{fixed_contract_type}"
+  }}
+}}
+The numbers above illustrate the format only; use the actual negotiated terms.
+Whenever you make, revise, or reaffirm a complete offer, include ALL current terms
+in "contract", matching the offer in "response". The student does not need to
+say an agreement keyword first. Never copy superseded terms over revised terms.
+If you are only discussing terms or any term remains unresolved, set "contract"
+to null and ask for clarification. Only the student's Accept Offer action activates
+a contract; a chat message does not activate it."""
     
     # Build conversation history for AI (only last 10 messages to stay within token limits)
     messages = [{"role": "system", "content": system_prompt}]
     for msg in chat_history[-10:]:  # Last 10 messages for context
         role = "user" if msg["role"] == "student" else "assistant"
         messages.append({"role": role, "content": msg["content"]})
-    
-    # If student might have agreed, add explicit agreement check question to the prompt
-    # This bundles everything into one API call instead of making a second call
-    # Only add if we don't already have a draft contract (to avoid redundant checks)
-    if might_be_agreement and not current_draft_contract:
-        agreement_check_question = f"""IMPORTANT: The student's message suggests they might be agreeing to finalize contract terms.
-
-Based on the entire conversation, extract the final agreed-upon terms and respond ONLY with a JSON object in this exact format:
-{{
-  "response": "A friendly confirmation message acknowledging the agreement",
-  "contract": {{
-    "wholesale_price": [final agreed wholesale price as number],
-    "buyback_price": [final agreed buyback price as number], 
-    "contract_length": [final agreed length as number],
-    "contract_type": "{initial_contract_type or 'buyback'}"
-  }},
-  "negotiation_complete": true
-}}
-
-If you cannot determine all terms from the conversation, set "negotiation_complete" to false and "contract" to null, and provide a normal response asking for clarification."""
-        messages.append({"role": "user", "content": agreement_check_question})
     
     try:
         # For DeepSeek, try alternative models if the free one fails
@@ -442,39 +433,23 @@ If you cannot determine all terms from the conversation, set "negotiation_comple
         if not ai_message or not ai_message.strip():
             raise ValueError(f"All models failed. Last error: {last_error}")
         
-        # Parse AI response
-        # If we asked for agreement check, expect JSON; otherwise, treat as natural conversation
-        if might_be_agreement and not current_draft_contract:
-            # Parse as JSON for agreement detection
-            ai_message_clean = ai_message.strip()
-            ai_message_clean = re.sub(r'^```(?:json)?\s*', '', ai_message_clean, flags=re.MULTILINE)
-            ai_message_clean = re.sub(r'```\s*$', '', ai_message_clean, flags=re.MULTILINE)
-            ai_message_clean = ai_message_clean.strip()
-            
-            try:
-                # Parse the cleaned message as JSON
-                response_data = json.loads(ai_message_clean)
-                
-                # Extract fields from structured JSON response
-                cleaned_message = response_data.get("response", "").strip()
-                json_contract = response_data.get("contract")
-                
-                # Validate that response field exists and is not empty
-                if not cleaned_message:
-                    raise ValueError("Empty response field in JSON")
-                    
-            except (json.JSONDecodeError, ValueError, KeyError, TypeError):
-                # If JSON parsing fails, try extracting terms from malformed JSON/text.
-                cleaned_message = ai_message.strip()
-                conversation_text = "\n".join(
-                    msg.get("content", "") for msg in chat_history[-10:]
-                )
-                json_contract = (
-                    extract_from_malformed_json(ai_message_clean)
-                    or extract_contract_terms_from_text(f"{conversation_text}\n{ai_message_clean}")
-                )
-        else:
-            # Normal conversation - return message as-is
+        # Never reconstruct an offer from older chat when the latest response is
+        # unstructured or malformed: doing so can resurrect superseded terms.
+        ai_message_clean = ai_message.strip()
+        ai_message_clean = re.sub(r'^```(?:json)?\s*', '', ai_message_clean, flags=re.MULTILINE)
+        ai_message_clean = re.sub(r'```\s*$', '', ai_message_clean, flags=re.MULTILINE)
+        try:
+            response_data = json.loads(ai_message_clean.strip())
+            if not isinstance(response_data, dict):
+                raise ValueError("Expected a JSON object")
+            cleaned_message = response_data.get("response", "")
+            if not isinstance(cleaned_message, str) or not cleaned_message.strip():
+                raise ValueError("Empty response field in JSON")
+            cleaned_message = cleaned_message.strip()
+            json_contract = response_data.get("contract")
+            if not isinstance(json_contract, dict):
+                json_contract = None
+        except (ValueError, KeyError, TypeError):
             cleaned_message = ai_message.strip()
             json_contract = None
         
@@ -491,13 +466,13 @@ If you cannot determine all terms from the conversation, set "negotiation_comple
                 neg_config = load_negotiation_config()
                 
                 # Handle both "contract_length" and "length" keys for backward compatibility
-                contract_length = json_contract.get("contract_length") or json_contract.get("length") or neg_config.length_min
+                contract_length = json_contract.get("contract_length", json_contract.get("length"))
                 contract_type_to_use = initial_ct or "buyback"
                 
                 # Create Contract object from JSON data
                 draft_contract = Contract(
-                    wholesale_price=float(json_contract.get("wholesale_price", 0)),
-                    buyback_price=float(json_contract.get("buyback_price", 0)),
+                    wholesale_price=float(json_contract["wholesale_price"]),
+                    buyback_price=float(json_contract["buyback_price"]),
                     length=int(contract_length),
                     contract_type=contract_type_to_use,
                 )
@@ -546,5 +521,5 @@ If you cannot determine all terms from the conversation, set "negotiation_comple
         
         return {
             "message": fallback_responses[fallback_index],
-            "draft_contract": current_draft_contract
+            "draft_contract": None
         }

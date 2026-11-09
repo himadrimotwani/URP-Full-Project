@@ -15,6 +15,7 @@ import random
 import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import RLock
 from typing import Any, Dict, List
 
 
@@ -408,6 +409,8 @@ class GameState:
     # Negotiation state
     negotiation_chat_history: List[Dict[str, str]] = field(default_factory=list)
     negotiation_draft_contract: Contract | None = None
+    negotiation_offer_version: int = 0  # Monotonic across negotiations in this session
+    negotiation_lock: Any = field(default_factory=RLock, repr=False, compare=False)
     initial_contract_type: str | None = None
     
     #BOT ADDITION
