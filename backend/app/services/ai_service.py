@@ -12,6 +12,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 from simulation.core import Contract, GameState, get_current_params, get_current_history
+from simulation.supplier_personality import personality_prompt
 from app.services.config_service import load_negotiation_config
 
 # ============================================================================
@@ -305,7 +306,9 @@ Current Game Status:
     contract_types_str = ', '.join(neg_config.contract_types_available)
     
     # Create a chat-specific system prompt that encourages ongoing negotiation
-    system_prompt = f"""You are a fashion supply chain supplier negotiating contract terms with a buyer. Your goal is to reach a mutually beneficial agreement.
+    system_prompt = f"""You are a fashion supply chain supplier negotiating contract terms with a buyer.
+
+{personality_prompt(game_state.personality if game_state else None)}
 
 BUSINESS CONTEXT:
 - You produce fashion items at ${params.supplier_cost:.2f} per unit
@@ -327,7 +330,7 @@ NEGOTIATION CONSTRAINTS:
 {game_context}
 
 NEGOTIATION GUIDELINES:
-1. Be professional and collaborative - aim for win-win agreements
+1. Negotiate according to your assigned supplier personality
 2. Discuss specific terms: wholesale price, buyback price, contract length
 3. Explain your reasoning based on costs, risks, and market conditions
 4. Ask questions to understand the buyer's priorities and constraints

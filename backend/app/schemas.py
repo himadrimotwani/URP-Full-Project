@@ -12,6 +12,7 @@ JSON serialization, and type checking.
 
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any
+from simulation.supplier_personality import DEFAULT_PERSONALITY, SupplierPersonality
 
 
 # ============================================================================
@@ -556,6 +557,7 @@ class GameStartRequest(BaseModel):
     Fields:
         rounds: Total number of rounds for this game (default: 50)
         demand_method: "bootstrap" or "normal" - how to generate demand (default: "bootstrap")
+        personality: Supplier preferences: selfish, fair (default), or altruistic.
     
     Usage:
         - Used in `/game/start` endpoint (POST)
@@ -569,6 +571,7 @@ class GameStartRequest(BaseModel):
     demand_method: str = "bootstrap"
     demand_history_id: str | None = None
     participant_id: str | None = None
+    personality: SupplierPersonality = DEFAULT_PERSONALITY
 
 
 class NegotiateRequest(BaseModel):

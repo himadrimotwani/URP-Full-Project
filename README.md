@@ -79,6 +79,8 @@ The demand history chart shows both historical periods and game rounds together.
 
 ## AI Usage
 
+Supplier personality stays fixed for each game and guides both AI proposal evaluation and negotiation chat, including concessions and offered terms. The `POST /game/start` request accepts `personality`: `selfish` (supplier profit first), `fair` (balanced profit and risk), or `altruistic` (buyer benefit with a viable supplier margin). Omitted values default to `fair`; missing or unrecognized values in legacy game state also use fair behavior. The offline proposal evaluator uses the same personality selection with its existing acceptance thresholds.
+
 This project uses AI in two ways:
 
 1. **As part of the negotiation system**: The supplier is powered by AI (OpenAI or DeepSeek) to provide realistic, educational negotiation experiences. The AI evaluates contract proposals and engages in conversational negotiation.
