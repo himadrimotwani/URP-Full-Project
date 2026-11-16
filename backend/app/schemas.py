@@ -627,6 +627,7 @@ class NegotiateResponse(BaseModel):
     ai_message: str                         # simple text explanation from "AI supplier"
     decision: str                           # "accept" or "reject"
     counter_contract: ContractData | None = None  # Always None for initial proposals
+    offer_version: int | None = None
 
 
 # ============================================================================
@@ -696,6 +697,7 @@ class NegotiationChatResponse(BaseModel):
     """
     supplier_message: str
     negotiation_draft_contract: ContractData | None = None  # Draft contract from chat if agreement detected
+    offer_version: int | None = None  # Identifies exactly the displayed draft
 
 
 class AcceptCounterRequest(BaseModel):
@@ -718,6 +720,7 @@ class AcceptCounterRequest(BaseModel):
     """
     session_id: str
     accept: bool  # True to accept offer, False to reject
+    offer_version: int = Field(gt=0, strict=True)  # Version displayed with the offer
 
 
 class AcceptCounterResponse(BaseModel):

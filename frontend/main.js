@@ -28,6 +28,8 @@
 let sessionId = null;     // Current game session_id
 let currentState = null;  // Latest GameStateResponse from backend
 let latestDisplayedProposal = null;
+let currentOfferVersion = null;
+let negotiationPending = false;
 
 document.addEventListener("DOMContentLoaded", () => {
     const isLocalFrontend =
@@ -1360,13 +1362,18 @@ document.addEventListener("DOMContentLoaded", () => {
      * - Shows the counteroffer section
      * - Updates section visibility
      */
-    function showCounterofferSection(counterContract, message) {
+    function showCounterofferSection(counterContract, message, offerVersion) {
         const section = document.getElementById("counteroffer-section");
         const details = document.getElementById("counteroffer-details");
         if (!section || !details) return;
-        if (!counterContract) return;
+        if (!counterContract || !Number.isInteger(offerVersion) || offerVersion <= 0) {
+            hideCounterofferSection();
+            return;
+        }
+        currentOfferVersion = offerVersion;
 
         let html = `<p><strong>${message}</strong></p>`;
+        html += `<p>Offer version ${offerVersion}</p>`;
         html += `<div class="contract-summary-grid">`;
         html += `<div class="contract-field"><strong>Type:</strong> ${counterContract.contract_type || "buyback"}</div>`;
         html += `<div class="contract-field"><strong>Wholesale (w):</strong> ${counterContract.wholesale_price}</div>`;
@@ -1458,6 +1465,7 @@ document.addEventListener("DOMContentLoaded", () => {
      * Hides the counteroffer section.
      */
     function hideCounterofferSection() {
+        currentOfferVersion = null;
         const section = document.getElementById("counteroffer-section");
         if (section) {
             section.style.display = "none";
@@ -1549,18 +1557,26 @@ document.addEventListener("DOMContentLoaded", () => {
      * - Shows appropriate notifications
      */
     async function handleCounterofferResponse(accept) {
+        if (negotiationPending) return;
         if (!sessionId) {
             addNotification("No active session.", "error");
             return;
         }
         
+        if (currentOfferVersion === null) {
+            addNotification("Review a current supplier offer before responding.", "info");
+            return;
+        }
+
+        negotiationPending = true;
         try {
             const data = await fetchJsonWithDetail(`${BASE_URL}/game/negotiate/accept-counter`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     session_id: sessionId,
-                    accept: accept
+                    accept: accept,
+                    offer_version: currentOfferVersion
                 }),
             });
             
@@ -1587,7 +1603,11 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         } catch (err) {
             console.error(err);
+            hideCounterofferSection();
+            updateSectionVisibility();
             addNotification("Error handling offer: " + err.message, "error");
+        } finally {
+            negotiationPending = false;
         }
     }
 
@@ -1610,6 +1630,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         negotiateForm.addEventListener("submit", async (e) => {
             e.preventDefault();
+            if (negotiationPending) return;
 
             if (negotiateOutput) {
                 negotiateOutput.textContent = "Submitting proposal...";
@@ -1660,7 +1681,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
             renderSubmittedProposal(body, "Submitted Proposal");
 
+            hideCounterofferSection();
             showChatSection();
+            negotiationPending = true;
             try {
                 const data = await fetchJsonWithDetail(`${BASE_URL}/game/negotiate`, {
                     method: "POST",
@@ -1692,7 +1715,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     updateSectionVisibility();
                 } else if (decision === "counter") {
                     addNotification("Negotiation: supplier issued an offer.", "info");
-                    showCounterofferSection(data.counter_contract, data.ai_message);
+                    showCounterofferSection(data.counter_contract, data.ai_message, data.offer_version);
                     hideChatSection();
                     updateSectionVisibility();
                 } else if (decision === "reject") {
@@ -1711,6 +1734,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     negotiateOutput.textContent = "Error: " + err.message;
                 }
                 addNotification("Negotiation error: " + err.message, "error");
+            } finally {
+                negotiationPending = false;
             }
         });
         
@@ -1735,6 +1760,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (chatForm) {
             chatForm.addEventListener("submit", async (e) => {
                 e.preventDefault();
+                if (negotiationPending) return;
                 const chatInput = document.getElementById("chat-input");
                 if (!chatInput || !chatInput.value.trim()) return;
                 
@@ -1743,7 +1769,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 
                 addChatMessage("student", message);
                 updateSubmittedProposalFromChat(message);
+                // The previous offer is withdrawn as soon as negotiations resume.
+                hideCounterofferSection();
+                updateSectionVisibility();
                 
+                negotiationPending = true;
                 try {
                     const data = await fetchJsonWithDetail(`${BASE_URL}/game/negotiate/chat`, {
                         method: "POST",
@@ -1758,15 +1788,20 @@ document.addEventListener("DOMContentLoaded", () => {
                     
                     // If draft contract is provided, show it as an offer
                     if (data.negotiation_draft_contract) {
-                        showCounterofferSection(data.negotiation_draft_contract, "Based on our discussion, here's the proposed contract. You can accept or reject it:");
+                        showCounterofferSection(data.negotiation_draft_contract, "Based on our discussion, here's the proposed contract. You can accept or reject it:", data.offer_version);
                         updateSectionVisibility();
                         addNotification("Supplier offer ready. Review the accept/reject buttons.", "info");
+                    } else {
+                        hideCounterofferSection();
+                        updateSectionVisibility();
                     }
                     
                 } catch (err) {
                     console.error(err);
                     addChatMessage("supplier", `Chat request failed: ${err.message}`);
                     addNotification("Chat error: " + err.message, "error");
+                } finally {
+                    negotiationPending = false;
                 }
             });
         }
