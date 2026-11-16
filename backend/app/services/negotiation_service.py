@@ -3,12 +3,15 @@ Negotiation service functions for evaluating contract proposals.
 """
 
 from simulation.core import Contract, EconomicParams, get_current_params, get_current_history
+from simulation.supplier_personality import (
+    PERSONALITY_THRESHOLDS, personality_prompt, resolve_personality,
+)
 from app.services.ai_service import clean_ai_response, openai_client, deepseek_client, ai_provider
 
 
 def supplier_evaluate_contract(
     proposed: Contract,
-    personality: str,
+    personality: str | None,
 ) -> tuple[str, str, Contract | None]:
     """
     Evaluates a contract proposal from the student using AI.
@@ -51,7 +54,7 @@ def supplier_evaluate_contract(
 def evaluate_proposal_with_ai(
     proposed: Contract,
     params: EconomicParams,
-    personality: str,
+    personality: str | None,
 ) -> tuple[str, str, Contract | None]:
     """
     Uses AI to evaluate a contract proposal and provide educational feedback.
@@ -120,13 +123,18 @@ OR
 DECISION: reject
 MESSAGE: [your explanation here]"""
 
+    system_prompt = (
+        "You are a supplier evaluating contract proposals. Be educational and helpful.\n\n"
+        + personality_prompt(personality)
+    )
+
     try:
         # Use the same AI provider as chat
         if ai_provider == "openai" and openai_client:
             response = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are a supplier evaluating contract proposals. Be educational and helpful."},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": evaluation_prompt}
                 ],
                 max_tokens=150,
@@ -141,7 +149,7 @@ MESSAGE: [your explanation here]"""
                     response = deepseek_client.chat.completions.create(
                         model=try_model,
                         messages=[
-                            {"role": "system", "content": "You are a supplier evaluating contract proposals. Be educational and helpful."},
+                            {"role": "system", "content": system_prompt},
                             {"role": "user", "content": evaluation_prompt}
                         ],
                         max_tokens=150,
@@ -186,7 +194,7 @@ MESSAGE: [your explanation here]"""
 def evaluate_proposal_simple_logic(
     proposed: Contract,
     params: EconomicParams,
-    personality: str,
+    personality: str | None,
 ) -> tuple[str, str, Contract | None]:
     """
     Personality-aware fallback logic for evaluating proposals when AI is unavailable.
@@ -210,12 +218,7 @@ def evaluate_proposal_simple_logic(
     score = margin - 0.5 * risk
 
     # Personality thresholds
-    if personality == "selfish":
-        threshold = 8
-    elif personality == "fair":
-        threshold = 4
-    else:  # altruistic
-        threshold = 1
+    threshold = PERSONALITY_THRESHOLDS[resolve_personality(personality)]
 
     # Decision
     if score >= threshold:

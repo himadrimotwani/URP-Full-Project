@@ -97,6 +97,7 @@ def start_game(request: GameStartRequest) -> GameStartResponse:
         historical_demands=history,
         method=request.demand_method,
         participant_id=request.participant_id,
+        personality=request.personality,
         negotiation_chat_history=[],
         negotiation_draft_contract=None,
     )
